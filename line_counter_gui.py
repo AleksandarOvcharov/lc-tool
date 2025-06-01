@@ -4,13 +4,19 @@ import os
 import fnmatch
 from pathlib import Path
 import threading
+import json
+import csv
+import io
 
 class LineCounterGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Line Counter - Code Analysis Tool")
         self.root.geometry("800x700")
-        self.root.resizable(True, True)
+        root.resizable(False, False)
+        
+        # Disable fullscreen mode with more robust approach
+        self.setup_fullscreen_prevention()
         
         # Variables
         self.selected_folder = tk.StringVar()
@@ -24,7 +30,14 @@ class LineCounterGUI:
         self.total_lines = 0
         self.total_files = 0
         
+        # Storage for export functionality
+        self.file_results = []
+        self.extension_stats = {}
+        
         self.setup_ui()
+        
+        # Ensure fullscreen is disabled after UI setup
+        self.disable_fullscreen()
         
     def setup_ui(self):
         # Main frame
@@ -49,7 +62,7 @@ class LineCounterGUI:
         # Include extensions
         ttk.Label(main_frame, text="Include Extensions:").grid(row=1, column=0, sticky=tk.W, pady=5)
         ttk.Entry(main_frame, textvariable=self.include_extensions).grid(row=1, column=1, columnspan=2, sticky=(tk.W, tk.E), pady=5)
-        ttk.Label(main_frame, text="(comma-separated, e.g., .py,.js,.html)", font=("Arial", 8)).grid(row=2, column=1, columnspan=2, sticky=tk.W)
+        ttk.Label(main_frame, text="(comma-separated, e.g., .py,.js,.html | .** = all except excluded | .* = everything)", font=("Arial", 8)).grid(row=2, column=1, columnspan=2, sticky=tk.W)
         
         # Exclude patterns
         ttk.Label(main_frame, text="Exclude File Patterns:").grid(row=3, column=0, sticky=tk.W, pady=5)
@@ -76,7 +89,14 @@ class LineCounterGUI:
         self.count_button = ttk.Button(button_frame, text="Count Lines", command=self.start_counting)
         self.count_button.pack(side=tk.LEFT, padx=(0, 10))
         
-        ttk.Button(button_frame, text="Clear Results", command=self.clear_results).pack(side=tk.LEFT)
+        ttk.Button(button_frame, text="Clear Results", command=self.clear_results).pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Export buttons (initially hidden)
+        self.export_csv_button = ttk.Button(button_frame, text="Export as CSV", command=self.export_csv)
+        self.export_json_button = ttk.Button(button_frame, text="Export as JSON", command=self.export_json)
+        
+        # Initially hide export buttons
+        self.show_export_buttons(False)
         
         # Progress bar
         self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
@@ -148,6 +168,16 @@ class LineCounterGUI:
             exclude_patterns = [pattern.strip() for pattern in self.exclude_patterns.get().split(",") if pattern.strip()]
             exclude_folders = [folder.strip() for folder in self.exclude_folders.get().split(",") if folder.strip()]
             
+            # Check for special extension patterns
+            include_all_except_excluded = ".**" in include_exts
+            include_everything = ".*" in include_exts
+            
+            # Remove special patterns from the list for normal processing
+            if include_all_except_excluded:
+                include_exts = [ext for ext in include_exts if ext != ".**"]
+            if include_everything:
+                include_exts = [ext for ext in include_exts if ext != ".*"]
+            
             # Results storage
             file_results = []
             extension_stats = {}
@@ -160,13 +190,30 @@ class LineCounterGUI:
                 for file in files:
                     file_path = Path(root) / file
                     
-                    # Check if file should be excluded by pattern
-                    if any(fnmatch.fnmatch(file, pattern) for pattern in exclude_patterns):
+                    # Check if file should be excluded by pattern (unless .* is used)
+                    if not include_everything and any(fnmatch.fnmatch(file, pattern) for pattern in exclude_patterns):
                         continue
                         
                     # Check if file extension is included
                     file_ext = file_path.suffix.lower()
-                    if include_exts and not any(file_ext == ext for ext in include_exts):
+                    
+                    # Determine if file should be included based on extension rules
+                    should_include = False
+                    
+                    if include_everything:
+                        # .* pattern: include everything
+                        should_include = True
+                    elif include_all_except_excluded:
+                        # .** pattern: include all extensions except those matching exclude patterns
+                        should_include = True  # Already filtered by exclude patterns above
+                    elif include_exts:
+                        # Normal extension filtering: include only specified extensions
+                        should_include = any(file_ext == ext for ext in include_exts)
+                    else:
+                        # No extensions specified: include everything (backward compatibility)
+                        should_include = True
+                    
+                    if not should_include:
                         continue
                         
                     # Count lines
@@ -259,6 +306,10 @@ class LineCounterGUI:
         return False
                 
     def update_results(self, file_results, extension_stats):
+        # Store results for export functionality
+        self.file_results = file_results
+        self.extension_stats = extension_stats
+        
         # Clear previous results
         self.tree.delete(*self.tree.get_children())
         
@@ -270,6 +321,9 @@ class LineCounterGUI:
         # Update summary
         size_mb = total_size / (1024 * 1024)
         self.summary_label.config(text=f"Total: {self.total_files} files, {self.total_lines:,} lines of code, {size_mb:.2f} MB")
+        
+        # Show export buttons when results are available
+        self.show_export_buttons(True)
         
         # Add extension summaries
         for ext, stats in sorted(extension_stats.items(), key=lambda x: x[1]['lines'], reverse=True):
@@ -298,6 +352,11 @@ class LineCounterGUI:
         self.total_lines = 0
         self.total_files = 0
         
+        # Clear export data and hide export buttons
+        self.file_results = []
+        self.extension_stats = {}
+        self.show_export_buttons(False)
+
     def format_size(self, size_bytes):
         """Format file size in human readable format"""
         for unit in ['B', 'KB', 'MB', 'GB']:
@@ -305,6 +364,301 @@ class LineCounterGUI:
                 return f"{size_bytes:.1f} {unit}"
             size_bytes /= 1024.0
         return f"{size_bytes:.1f} TB"
+
+    def show_export_buttons(self, show):
+        """Show or hide export buttons based on whether results are available"""
+        if show:
+            self.export_csv_button.pack(side=tk.LEFT, padx=(0, 10))
+            self.export_json_button.pack(side=tk.LEFT, padx=(0, 10))
+        else:
+            self.export_csv_button.pack_forget()
+            self.export_json_button.pack_forget()
+
+    def export_csv(self):
+        """Export results as CSV with preview and save/copy options"""
+        if not self.file_results:
+            messagebox.showwarning("Warning", "No results to export!")
+            return
+            
+        # Generate CSV data
+        csv_data = self.generate_csv_data()
+        
+        # Show preview dialog
+        self.show_export_preview("CSV Export", csv_data, "csv")
+
+    def export_json(self):
+        """Export results as JSON with preview and save/copy options"""
+        if not self.file_results:
+            messagebox.showwarning("Warning", "No results to export!")
+            return
+            
+        # Generate JSON data
+        json_data = self.generate_json_data()
+        
+        # Show preview dialog
+        self.show_export_preview("JSON Export", json_data, "json")
+
+    def generate_csv_data(self):
+        """Generate CSV formatted data from results"""
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write header
+        writer.writerow(['File Path', 'Extension', 'Lines of Code', 'File Size (bytes)', 'File Size (KB)'])
+        
+        # Write data for each file
+        for file_info in sorted(self.file_results, key=lambda x: x['lines'], reverse=True):
+            size_kb = file_info['size'] / 1024
+            writer.writerow([
+                file_info['path'],
+                file_info['extension'] or '(no extension)',
+                file_info['lines'],
+                file_info['size'],
+                f"{size_kb:.2f}"
+            ])
+        
+        # Add summary section
+        writer.writerow([])  # Empty row
+        writer.writerow(['=== SUMMARY ==='])
+        writer.writerow(['Total Files', '', self.total_files, '', ''])
+        writer.writerow(['Total Lines', '', self.total_lines, '', ''])
+        writer.writerow(['Total Size (MB)', '', '', '', f"{sum(f['size'] for f in self.file_results) / (1024*1024):.2f}"])
+        
+        # Add extension summary
+        writer.writerow([])
+        writer.writerow(['=== BY EXTENSION ==='])
+        writer.writerow(['Extension', 'Files', 'Lines', 'Size (KB)', ''])
+        
+        for ext, stats in sorted(self.extension_stats.items(), key=lambda x: x[1]['lines'], reverse=True):
+            ext_name = ext if ext else '(no extension)'
+            size_kb = stats['size'] / 1024
+            writer.writerow([ext_name, stats['files'], stats['lines'], f"{size_kb:.2f}", ''])
+        
+        return output.getvalue()
+
+    def generate_json_data(self):
+        """Generate JSON formatted data from results"""
+        export_data = {
+            'analysis_summary': {
+                'total_files': self.total_files,
+                'total_lines': self.total_lines,
+                'total_size_bytes': sum(f['size'] for f in self.file_results),
+                'analyzed_folder': self.selected_folder.get(),
+                'count_method': self.line_count_method.get()
+            },
+            'files': [
+                {
+                    'path': file_info['path'],
+                    'extension': file_info['extension'] or None,
+                    'lines_of_code': file_info['lines'],
+                    'file_size_bytes': file_info['size'],
+                    'file_size_kb': round(file_info['size'] / 1024, 2)
+                }
+                for file_info in sorted(self.file_results, key=lambda x: x['lines'], reverse=True)
+            ],
+            'extension_summary': [
+                {
+                    'extension': ext if ext else None,
+                    'file_count': stats['files'],
+                    'total_lines': stats['lines'],
+                    'total_size_bytes': stats['size'],
+                    'total_size_kb': round(stats['size'] / 1024, 2)
+                }
+                for ext, stats in sorted(self.extension_stats.items(), key=lambda x: x[1]['lines'], reverse=True)
+            ]
+        }
+        
+        return json.dumps(export_data, indent=2, ensure_ascii=False)
+
+    def show_export_preview(self, title, data, file_type):
+        """Show preview dialog with export data and save/copy options"""
+        # Create preview window
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title(title)
+        preview_window.geometry("800x600")
+        preview_window.resizable(True, True)
+        
+        # Configure grid weights
+        preview_window.columnconfigure(0, weight=1)
+        preview_window.rowconfigure(1, weight=1)
+        
+        # Title and info
+        info_frame = ttk.Frame(preview_window, padding="10")
+        info_frame.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        info_frame.columnconfigure(1, weight=1)
+        
+        ttk.Label(info_frame, text=f"{title} Preview", font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        ttk.Label(info_frame, text=f"Files: {self.total_files}, Lines: {self.total_lines:,}").grid(row=1, column=0, sticky=tk.W)
+        
+        # Text area with scrollbars
+        text_frame = ttk.Frame(preview_window, padding="10")
+        text_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
+        
+        # Text widget with scrollbars
+        text_widget = tk.Text(text_frame, wrap=tk.NONE, font=("Consolas", 9))
+        v_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        h_scroll = ttk.Scrollbar(text_frame, orient=tk.HORIZONTAL, command=text_widget.xview)
+        text_widget.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        
+        text_widget.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        v_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        h_scroll.grid(row=1, column=0, sticky=(tk.W, tk.E))
+        
+        # Insert data
+        text_widget.insert(tk.END, data)
+        text_widget.config(state=tk.DISABLED)  # Make read-only
+        
+        # Buttons
+        button_frame = ttk.Frame(preview_window, padding="10")
+        button_frame.grid(row=2, column=0, sticky=(tk.W, tk.E))
+        
+        def copy_to_clipboard():
+            preview_window.clipboard_clear()
+            preview_window.clipboard_append(data)
+            messagebox.showinfo("Success", "Data copied to clipboard!")
+        
+        def save_to_file():
+            try:
+                file_extension = "csv" if file_type == "csv" else "json"
+                default_filename = f"line_count_results.{file_extension}"
+                filetypes = [
+                    (f"{file_type.upper()} files", f"*.{file_extension}"),
+                    ("All files", "*.*")
+                ]
+                
+                filename = filedialog.asksaveasfilename(
+                    title=f"Save {file_type.upper()} file",
+                    defaultextension=f".{file_extension}",
+                    filetypes=filetypes,
+                    initialfile=default_filename
+                )
+                
+                if filename:
+                    # Ensure the file has the correct extension
+                    if not filename.lower().endswith(f'.{file_extension}'):
+                        filename += f'.{file_extension}'
+                    
+                    # Use different newline settings for CSV vs JSON
+                    newline_setting = '' if file_type == "csv" else None
+                    
+                    try:
+                        with open(filename, 'w', encoding='utf-8', newline=newline_setting) as f:
+                            f.write(data)
+                        
+                        # Verify the file was actually written
+                        if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                            messagebox.showinfo("Success", f"Data saved successfully!\n\nFile: {filename}\nSize: {os.path.getsize(filename)} bytes")
+                            preview_window.destroy()
+                        else:
+                            messagebox.showerror("Error", "File was created but appears to be empty or inaccessible.")
+                            
+                    except PermissionError:
+                        messagebox.showerror("Permission Error", f"Cannot write to the selected location.\nPlease choose a different location or run as administrator.\n\nFile: {filename}")
+                    except OSError as e:
+                        messagebox.showerror("File System Error", f"Cannot write to file:\n{str(e)}\n\nPlease try a different location or filename.")
+                    except Exception as e:
+                        messagebox.showerror("Error", f"Failed to save file:\n{str(e)}\n\nFile: {filename}")
+                else:
+                    # User cancelled the dialog - this is normal, no error message needed
+                    pass
+                    
+            except Exception as e:
+                messagebox.showerror("Error", f"An error occurred while trying to save:\n{str(e)}")
+        
+        ttk.Button(button_frame, text="Copy to Clipboard", command=copy_to_clipboard).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="Save to File", command=save_to_file).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(button_frame, text="Close", command=preview_window.destroy).pack(side=tk.RIGHT)
+
+    def disable_fullscreen(self):
+        """Comprehensive fullscreen prevention system"""
+        try:
+            # Force fullscreen to be disabled
+            self.root.attributes('-fullscreen', False)
+            
+            # Bind all possible fullscreen key combinations
+            fullscreen_keys = [
+                '<F11>', '<Control-F11>', '<Shift-F11>', '<Alt-F11>',
+                '<Alt-Return>', '<Alt-Enter>', '<Control-Alt-Return>',
+                '<Super-F11>', '<Meta-F11>'
+            ]
+            
+            for key in fullscreen_keys:
+                try:
+                    self.root.bind(key, lambda e: self.force_windowed_mode())
+                except tk.TclError:
+                    pass  # Some key combinations might not be supported
+            
+            # Monitor window state changes
+            self.root.bind('<Configure>', self.check_fullscreen_state)
+            self.root.bind('<FocusIn>', self.check_fullscreen_state)
+            self.root.bind('<Map>', self.check_fullscreen_state)
+            
+            # Start periodic fullscreen checking
+            self.monitor_fullscreen()
+            
+        except tk.TclError:
+            # Some window managers might not support these attributes
+            pass
+    
+    def force_windowed_mode(self):
+        """Force the window back to windowed mode"""
+        try:
+            self.root.attributes('-fullscreen', False)
+            # Ensure window is visible and properly sized
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+    
+    def check_fullscreen_state(self, event=None):
+        """Check and prevent fullscreen state"""
+        try:
+            # Check if window is in fullscreen mode
+            if self.root.attributes('-fullscreen'):
+                self.force_windowed_mode()
+                
+            # Also check window size and prevent if it's screen-sized
+            if hasattr(self.root, 'winfo_width') and hasattr(self.root, 'winfo_height'):
+                screen_width = self.root.winfo_screenwidth()
+                screen_height = self.root.winfo_screenheight()
+                win_width = self.root.winfo_width()
+                win_height = self.root.winfo_height()
+                
+                # If window takes up entire screen, resize it smaller
+                if win_width >= screen_width and win_height >= screen_height:
+                    new_width = int(screen_width * 0.9)
+                    new_height = int(screen_height * 0.8)
+                    self.root.geometry(f"{new_width}x{new_height}")
+                    self.root.update()
+                    
+        except tk.TclError:
+            pass
+    
+    def monitor_fullscreen(self):
+        """Continuously monitor and prevent fullscreen mode"""
+        self.check_fullscreen_state()
+        # Schedule next check in 100ms
+        self.root.after(100, self.monitor_fullscreen)
+
+    def setup_fullscreen_prevention(self):
+        """Set up initial fullscreen prevention"""
+        # Disable fullscreen mode
+        self.root.attributes('-fullscreen', False)
+        
+        # Prevent fullscreen with F11 key and other fullscreen methods
+        self.root.bind('<F11>', lambda e: self.force_windowed_mode())
+        self.root.bind('<Alt-Return>', lambda e: self.force_windowed_mode())
+        self.root.bind('<Alt-F4>', lambda e: self.root.quit())  # Keep Alt+F4 for quit
+        
+        # Set maximum window size to screen size (prevents true fullscreen)
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        max_width = int(screen_width * 0.95)  # 95% of screen width
+        max_height = int(screen_height * 0.90)  # 90% of screen height
+        self.root.maxsize(max_width, max_height)
 
 def main():
     root = tk.Tk()

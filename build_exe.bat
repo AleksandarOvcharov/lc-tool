@@ -2,6 +2,9 @@
 echo Building LineCounter executable...
 echo.
 
+REM Navigate to the script directory
+cd /d "%~dp0"
+
 REM Clean previous build
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
