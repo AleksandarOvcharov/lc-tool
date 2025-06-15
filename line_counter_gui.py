@@ -219,23 +219,26 @@ class LineCounterGUI:
                     # Count lines
                     try:
                         lines = self.count_file_lines(file_path, self.line_count_method.get())
-                        if lines > 0:
-                            file_size = file_path.stat().st_size
-                            rel_path = file_path.relative_to(folder_path)
-                            
-                            file_results.append({
-                                'path': str(rel_path),
-                                'lines': lines,
-                                'size': file_size,
-                                'extension': file_ext
-                            })
-                            
-                            # Update extension stats
-                            if file_ext not in extension_stats:
-                                extension_stats[file_ext] = {'files': 0, 'lines': 0, 'size': 0}
-                            extension_stats[file_ext]['files'] += 1
+                        file_size = file_path.stat().st_size
+                        rel_path = file_path.relative_to(folder_path)
+                        
+                        # Always add file to results, even if binary or 0 lines
+                        file_results.append({
+                            'path': str(rel_path),
+                            'lines': lines,
+                            'size': file_size,
+                            'extension': file_ext
+                        })
+                        
+                        # Update extension stats
+                        if file_ext not in extension_stats:
+                            extension_stats[file_ext] = {'files': 0, 'lines': 0, 'size': 0}
+                        extension_stats[file_ext]['files'] += 1
+                        
+                        # Only add to line and size count if not binary
+                        if lines != "binary" and lines > 0:
                             extension_stats[file_ext]['lines'] += lines
-                            extension_stats[file_ext]['size'] += file_size
+                        extension_stats[file_ext]['size'] += file_size
                             
                     except Exception as e:
                         print(f"Error reading {file_path}: {e}")
@@ -249,8 +252,66 @@ class LineCounterGUI:
         finally:
             self.root.after(0, self.counting_finished)
             
+    def is_binary_file(self, file_path):
+        """Check if a file is binary by examining the first 8192 bytes"""
+        try:
+            # First check if the file extension is known to be text
+            file_ext = Path(file_path).suffix.lower()
+            
+            # Known text file extensions - these should never be considered binary
+            text_extensions = {
+                '.txt', '.md', '.rst', '.log', '.ini', '.cfg', '.conf', '.config',
+                '.py', '.pyw', '.js', '.jsx', '.ts', '.tsx', '.html', '.htm', '.xhtml',
+                '.css', '.scss', '.sass', '.less', '.json', '.xml', '.yaml', '.yml',
+                '.java', '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.cs', '.php',
+                '.rb', '.go', '.rs', '.swift', '.kt', '.scala', '.r', '.m', '.mm',
+                '.sh', '.bash', '.zsh', '.fish', '.bat', '.cmd', '.ps1', '.sql',
+                '.pl', '.pm', '.lua', '.tcl', '.vb', '.vbs', '.asm', '.s',
+                '.dockerfile', '.makefile', '.cmake', '.gradle', '.maven',
+                '.gitignore', '.gitattributes', '.htaccess', '.env',
+                '.vue', '.svelte', '.elm', '.dart', '.groovy', '.clj', '.cljs',
+                '.lisp', '.scm', '.rkt', '.hs', '.fs', '.fsx', '.ml', '.mli',
+                '.tex', '.bib', '.sty', '.cls', '.dtx', '.ins'
+            }
+            
+            # If it's a known text extension, don't consider it binary
+            if file_ext in text_extensions:
+                return False
+                
+            # For files without extension or unknown extensions, check content
+            with open(file_path, 'rb') as f:
+                chunk = f.read(8192)
+                
+            # Empty files are not binary
+            if len(chunk) == 0:
+                return False
+                
+            # Check for null bytes which strongly indicate binary files
+            if b'\x00' in chunk:
+                return True
+                
+            # Expanded definition of text characters including more Unicode ranges
+            # ASCII printable (32-126) + common control chars (9=tab, 10=LF, 13=CR) + extended ASCII (128-255)
+            text_chars = sum(1 for byte in chunk if 
+                           (32 <= byte <= 126) or  # ASCII printable
+                           byte in (9, 10, 13) or  # Tab, LF, CR
+                           (128 <= byte <= 255))   # Extended ASCII/UTF-8 continuation bytes
+            
+            # Much more lenient threshold - only consider binary if less than 50% are text-like
+            if len(chunk) > 0 and text_chars / len(chunk) < 0.50:
+                return True
+                
+            return False
+        except:
+            # If we can't read the file, assume it's binary to be safe
+            return True
+
     def count_file_lines(self, file_path, method):
         """Count lines in a file based on the selected method"""
+        # First check if file is binary
+        if self.is_binary_file(file_path):
+            return "binary"
+            
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.readlines()
@@ -313,9 +374,9 @@ class LineCounterGUI:
         # Clear previous results
         self.tree.delete(*self.tree.get_children())
         
-        # Calculate totals
+        # Calculate totals (excluding binary files from line count)
         self.total_files = len(file_results)
-        self.total_lines = sum(result['lines'] for result in file_results)
+        self.total_lines = sum(result['lines'] for result in file_results if result['lines'] != "binary" and isinstance(result['lines'], int))
         total_size = sum(result['size'] for result in file_results)
         
         # Update summary
@@ -334,12 +395,19 @@ class LineCounterGUI:
             
             # Add individual files for this extension
             ext_files = [f for f in file_results if f['extension'] == ext]
-            ext_files.sort(key=lambda x: x['lines'], reverse=True)
+            # Sort with binary files at the end
+            ext_files.sort(key=lambda x: (-1, x['path']) if x['lines'] == "binary" else (x['lines'], x['path']), reverse=True)
             
             for file_info in ext_files:
                 size_kb = file_info['size'] / 1024
+                # Handle binary files display
+                if file_info['lines'] == "binary":
+                    lines_display = "binary"
+                else:
+                    lines_display = f"{file_info['lines']:,}"
+                    
                 self.tree.insert(parent, "end", text=file_info['path'], 
-                               values=(f"{file_info['lines']:,}", f"{size_kb:.1f} KB"))
+                               values=(lines_display, f"{size_kb:.1f} KB"))
         
     def counting_finished(self):
         self.progress.stop()
@@ -406,8 +474,13 @@ class LineCounterGUI:
         # Write header
         writer.writerow(['File Path', 'Extension', 'Lines of Code', 'File Size (bytes)', 'File Size (KB)'])
         
-        # Write data for each file
-        for file_info in sorted(self.file_results, key=lambda x: x['lines'], reverse=True):
+        # Write data for each file (sort with binary files at the end)
+        def sort_key(x):
+            if x['lines'] == "binary":
+                return (-1, x['path'])  # Binary files at end
+            return (x['lines'], x['path'])
+        
+        for file_info in sorted(self.file_results, key=sort_key, reverse=True):
             size_kb = file_info['size'] / 1024
             writer.writerow([
                 file_info['path'],
@@ -454,7 +527,7 @@ class LineCounterGUI:
                     'file_size_bytes': file_info['size'],
                     'file_size_kb': round(file_info['size'] / 1024, 2)
                 }
-                for file_info in sorted(self.file_results, key=lambda x: x['lines'], reverse=True)
+                for file_info in sorted(self.file_results, key=lambda x: (-1, x['path']) if x['lines'] == "binary" else (x['lines'], x['path']), reverse=True)
             ],
             'extension_summary': [
                 {
